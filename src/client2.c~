@@ -1,0 +1,176 @@
+// 경로: src/client.c
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <sys/select.h> 
+
+#define SOCK_PATH "/tmp/omok.sock"
+#define BOARD_SIZE 15
+
+// 클라이언트 로컬 보드
+int my_board[BOARD_SIZE][BOARD_SIZE];
+
+void init_my_board() {
+    memset(my_board, 0, sizeof(my_board));
+}
+
+// UI 그리기 함수
+void draw_board() {
+    // 화면 클리어 (ANSI Escape code)
+    printf("\033[2J\033[1;1H"); 
+    
+    printf("   ");
+    for (int i = 0; i < BOARD_SIZE; i++) printf("%2d ", i);
+    printf("\n");
+
+    for (int i = 0; i < BOARD_SIZE; i++) {
+        printf("%2d ", i);
+        for (int j = 0; j < BOARD_SIZE; j++) {
+            if (my_board[i][j] == 0) printf(" . ");
+            else if (my_board[i][j] == 1) printf(" O "); // Player 1 (흑)
+            else if (my_board[i][j] == 2) printf(" X "); // Player 2 (백)
+        }
+        printf("\n");
+    }
+    printf("\nCommands: exit, restart, x y\n");
+}
+
+int read_line(int fd, char* buf, int size) {
+    int i = 0;
+    char c;
+    while (i < size - 1) {
+        int n = read(fd, &c, 1);
+        if (n <= 0) return n;
+        if (c == '\n') {
+            buf[i] = '\0';
+            return i;
+        }
+        buf[i++] = c;
+    }
+    buf[i] = '\0';
+    return i;
+}
+
+int main() {
+    int fd;
+    struct sockaddr_un addr;
+    char buf[256];
+    int game_over = 0;
+
+    init_my_board();
+
+    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd == -1) {
+        perror("socket");
+        return 1;
+    }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strcpy(addr.sun_path, SOCK_PATH);
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
+        perror("connect");
+        close(fd);
+        return 1;
+    }
+
+    // 접속 메시지 
+    write(fd, "JOIN user2\n", 11);
+    printf("Connected. Waiting for opponent...\n");
+
+    while (1) {
+        // 보드가 바뀔 때마다 다시 그림 (게임 오버가 아닐 때만)
+        if (!game_over) {
+            // draw_board(); // 여기서 매번 그리면 깜빡일 수 있으니 MOVE 때 그림
+        }
+
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(0, &readfds);
+        FD_SET(fd, &readfds);
+
+        int max_fd = fd;
+
+        if (select(max_fd + 1, &readfds, NULL, NULL, NULL) < 0) break;
+
+        // 서버 메시지 수신
+        if (FD_ISSET(fd, &readfds)) {
+            int n = read_line(fd, buf, sizeof(buf));
+            if (n <= 0) break;
+
+            // 디버깅용 (필요하면 주석 처리)
+            // printf("[Server] %s\n", buf);
+
+            // 1. MOVE 파싱 및 UI 업데이트
+            // 형식: MOVE <player> <x> <y>
+            int p, x, y;
+            if (strncmp(buf, "MOVE", 4) == 0) {
+                if (sscanf(buf + 5, "%d %d %d", &p, &x, &y) == 3) {
+                    if (x >= 0 && x < BOARD_SIZE && y >= 0 && y < BOARD_SIZE) {
+                        my_board[x][y] = p; // 좌표계 주의 (서버가 x,y를 행,열로 쓰는지 확인 필요)
+                        draw_board();
+                    }
+                }
+            }
+
+            // 2. RESET 처리
+            if (strncmp(buf, "RESET", 5) == 0) {
+                init_my_board();
+                draw_board();
+                game_over = 0;
+            }
+
+            if (strncmp(buf, "START", 5) == 0) {
+                draw_board();
+                printf("Game Started!\n");
+            }
+
+            if (strncmp(buf, "TURN", 4) == 0) {
+                // TURN 메시지가 오면 입력 프롬프트 갱신
+                int turn;
+                sscanf(buf + 5, "%d", &turn);
+                printf(">> TURN Player %d: ", turn);
+                fflush(stdout);
+            }
+
+            if (strstr(buf, "WIN")) {
+                printf("\n🏆 %s 🏆\n", buf);
+            }
+
+            if (strstr(buf, "GAME_OVER")) {
+                game_over = 1;
+                printf("Game Over. Type 'restart' to play again or 'exit'.\n");
+            }
+        }
+
+        // 키보드 입력
+        if (FD_ISSET(0, &readfds)) {
+            char input[128];
+            if (!fgets(input, sizeof(input), stdin)) break;
+            
+            input[strcspn(input, "\n")] = 0;
+            if (strlen(input) == 0) continue;
+
+            if (strcmp(input, "exit") == 0) {
+                write(fd, "EXIT\n", 5);
+                break;
+            } else if (strcmp(input, "restart") == 0) {
+                write(fd, "RESTART\n", 8);
+            } else {
+                int r, c;
+                if (sscanf(input, "%d %d", &r, &c) == 2) {
+                    char msg[64];
+                    snprintf(msg, sizeof(msg), "MOVE %d %d\n", r, c);
+                    write(fd, msg, strlen(msg));
+                }
+            }
+        }
+    }
+
+    close(fd);
+    return 0;
+}
